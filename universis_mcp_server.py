@@ -607,8 +607,8 @@ class CleaningAsyncClient(httpx.AsyncClient):
         super().__init__(event_hooks=hooks, *args, **kwargs)
 
     async def _inject_token(self, request: httpx.Request):
-        # AUTH_MODE != "bearer" -- passthrough Authorization header from MCP transport
-        if AUTH_MODE != "bearer":
+        # AUTH_MODE == "bearer" -- passthrough Authorization header from MCP transport
+        if AUTH_MODE == "bearer":
             mcp_headers = get_http_headers(include={"authorization"})
             if "authorization" in mcp_headers:
                 a = mcp_headers["authorization"]
@@ -616,7 +616,7 @@ class CleaningAsyncClient(httpx.AsyncClient):
                 request.headers["Authorization"] = a
                 return
             logger.warning(
-                "[AUTH] AUTH_MODE=os.getenv('AUTH_MODE', ' but no Authorization header in MCP transport"
+                "[AUTH] AUTH_MODE='bearer' but no Authorization header in MCP transport"
             )
             logger.info("[AUTH] Falling back to OAuth2 token supplier")
         token = await self._token_supplier()
@@ -732,14 +732,18 @@ def generate_summary(method: str, path: str, tags: list, summary: str) -> str:
     return summary
 
 def customize_components(route: Any, component: OpenAPITool | OpenAPIResource | OpenAPIResourceTemplate) -> None:
-#    tag = route.tags[0] if route.tags else "Generic"
     action = route.operation_id or route.path.split("/")[-1] or ""
     rec_object = route.operation_id or route.path.split("/")[2] or ""
     clean_action = action.replace("{", "").replace("}", "").replace("/", "_")
-#    component.name = f"{route.method}_{tag}" + (f"_{clean_action}" if clean_action else "")
-    component.name = f"{route.method}_{rec_object}" + (f"_{clean_action}" if clean_action else "")
-    enriched_summary = generate_summary(route.method, route.path, route.tags, route.summary or "No description")
-    component.description = f"{enriched_summary}"
+    if route.operation_id:
+        # Use operation_id directly (already includes method prefix like GET_Institutes)
+        component.name = route.operation_id
+        enriched_summary = generate_summary(route.method, route.path, route.tags, route.summary or "No description")
+        component.description = f"{enriched_summary}"
+    else:
+        component.name = f"{route.method}_{rec_object}" + (f"_{clean_action}" if clean_action else "")
+        enriched_summary = generate_summary(route.method, route.path, route.tags, route.summary or "No description")
+        component.description = f"{enriched_summary}"
     if isinstance(component, OpenAPITool):
         param_details = []
         for p in getattr(route, "parameters", []) or []:
@@ -881,10 +885,62 @@ async def load_openapi_doc(base_url: str, path: str) -> dict:
         return data
 
 # ───────────────────────────────────────────────────────────────────────────────
+# operationId injection (needed when Universis spec has empty operationIds)
+# ───────────────────────────────────────────────────────────────────────────────
+
+def _pascal_to_mcp_id(path: str, method: str) -> str:
+    """Build operation ID: GET /api/Institutes/{id}/ -> GET_Institutes_WithId
+
+    Rules:
+    - Remove /api prefix
+    - Remove trailing slashes
+    - Split on '/'
+    - Static segments keep as-is (already PascalCase from Universis)
+    - Path params {param} -> WithParam (capitalized)
+    - Multiple path params -> GET_X_WithId_WithCourseId etc.
+    """
+    clean = path.strip('/')
+    if clean.startswith('api/'):
+        clean = clean[4:]
+    segments = [s for s in clean.split('/') if s]
+
+    static_parts = []
+    param_parts = []
+    for s in segments:
+        m = PATH_PARAM_RE.match(s)
+        if m:
+            pname = m.group(1)
+            param_parts.append(pname[0].upper() + pname[1:] if pname else '')
+        else:
+            static_parts.append(s)
+
+    entity_part = '_'.join(static_parts) if static_parts else ''
+    param_part = 'With' + '_With'.join(param_parts) if param_parts else ''
+
+    parts = [method.upper(), entity_part]
+    if param_part:
+        parts.append(param_part)
+
+    return '_'.join(filter(None, parts))
+
+
+def inject_operation_ids(spec: dict) -> dict:
+    """Inject operationId into every endpoint that doesn't have one."""
+    paths = spec.get('paths', {})
+    for path, methods in paths.items():
+        for method, op in methods.items():
+            if method not in ('get', 'put', 'post', 'delete', 'patch', 'options', 'head'):
+                continue
+            if isinstance(op, dict) and not op.get('operationId'):
+                op['operationId'] = _pascal_to_mcp_id(path, method)
+    return spec
+
+# ───────────────────────────────────────────────────────────────────────────────
 # Main entry
 # ───────────────────────────────────────────────────────────────────────────────
 async def main():
     openapi_spec = await load_openapi_doc(BASE_URL, SCHEMA_PATH)
+    openapi_spec = inject_operation_ids(openapi_spec)  # ← Add BEFORE sanitize! 
     openapi_spec = sanitize_openapi_for_fastmcp(openapi_spec)
     openapi_spec = clean_refs(openapi_spec)  # ← Add this
     openapi_spec = normalize_null_strings(openapi_spec)  # ← Then this

@@ -1,0 +1,105 @@
+# Route maps for Universis MCP Server
+# Controls which OpenAPI endpoints become MCP tools.
+# First match wins. Default fallback is TOOL.
+# 
+# Format:
+#   methods: HTTP method(s) or "*" for all
+#   pattern: Python regex matched against the raw path
+#   mcp_type: TOOL, RESOURCE, RESOURCE_TEMPLATE, or EXCLUDE
+#   tags: FastMCP tags
+#   mcp_tags: MCP protocol tags
+
+# ─── Collection endpoints (list) ─────────────────────────────────────
+- methods: ["GET"]
+  pattern: "^/api/AcademicPeriods/$"
+  mcp_type: TOOL
+  tags: ["AcademicPeriod"]
+  mcp_tags: ["Academic periods entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/AcademicYears/$"
+  mcp_type: TOOL
+  tags: ["AcademicYear"]
+  mcp_tags: ["Academic years entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/Institutes/$"
+  mcp_type: TOOL
+  tags: ["Institute"]
+  mcp_tags: ["Institute entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/Persons/$"
+  mcp_type: TOOL
+  tags: ["Person"]
+  mcp_tags: ["Person entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/Personnels/$"
+  mcp_type: TOOL
+  tags: ["Personnel"]
+  mcp_tags: ["Personnels entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/StudyPrograms/$"
+  mcp_type: TOOL
+  tags: ["StudyProgram"]
+  mcp_tags: ["Study programs entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/Courses/$"
+  mcp_type: TOOL
+  tags: ["Course"]
+  mcp_tags: ["Courses entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/CourseTypes/$"
+  mcp_type: TOOL
+  tags: ["CourseType"]
+  mcp_tags: ["Course types entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/CourseClasses/$"
+  mcp_type: TOOL
+  tags: ["CourseClass"]
+  mcp_tags: ["Courses classes entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/CourseExams/$"
+  mcp_type: TOOL
+  tags: ["CourseExam"]
+  mcp_tags: ["Course exams entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/Departments/$"
+  mcp_type: TOOL
+  tags: ["Department"]
+  mcp_tags: ["Departments entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/Students/$"
+  mcp_type: TOOL
+  tags: ["Student"]
+  mcp_tags: ["Students entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/StudentRequestActions/$"
+  mcp_type: TOOL
+  tags: ["StudentRequestAction"]
+  mcp_tags: ["Student request actions entrypoints"]
+
+- methods: ["GET"]
+  pattern: "^/api/StudentPeriodRegistrations/$"
+  mcp_type: TOOL
+  tags: ["StudentPeriodRegistration"]
+  mcp_tags: ["Students entrypoints"]
+
+# ─── Pattern: all Student* collections ─────────────────────────────
+- methods: ["GET"]
+  pattern: "^/api/Student[^/]+/?$"
+  mcp_type: TOOL
+
+# ─── Fallback: exclude everything else ──────────────────────────────
+- methods: "*"
+  pattern: ".*"
+  mcp_type: EXCLUDE
