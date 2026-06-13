@@ -1,5 +1,7 @@
 # Universis MCP Server
 
+> **Version:** 0.2.2
+
 A FastMCP-based MCP server that wraps the Universis REST API (Ellogon/OData) into MCP tools and resources. Uses OAuth2 **client_credentials** flow to obtain tokens, or supports **bearer passthrough** from the MCP transport.
 
 ## Features
@@ -189,6 +191,19 @@ Route maps control which endpoints become MCP tools, resources, or are excluded.
 - Group endpoints logically
 - Rename tool tags
 
+> **First match wins, and the last rule should be an explicit `EXCLUDE`.**
+> Rules are evaluated top-to-bottom and the first one that matches a path
+> decides its fate. Always end the file with a catch-all
+> `{ methods: "*", pattern: ".*", mcp_type: EXCLUDE }` rule so that endpoints
+> you did not explicitly list are dropped, rather than relying on FastMCP's
+> implicit "default = TOOL" behaviour (which would expose all ~3000 endpoints).
+>
+> The shipped [`route_maps.yaml`](route_maps.yaml) is **read-only**: it exposes
+> GET collection endpoints (`GET_Students`) and GET item-by-id endpoints
+> (`GET_Students_WithId`) for the common registrar entities, and excludes every
+> write method. To enable a write endpoint, add a rule for it **above** the
+> final `EXCLUDE` rule (see [Enabling write endpoints](#enabling-write-endpoints)).
+
 ### Format
 
 Route maps are an array of objects, each with:
@@ -204,7 +219,7 @@ Route maps are an array of objects, each with:
 ### Example `route_maps.yaml`
 
 ```yaml
-# Only expose GET endpoints for common collections
+# Expose GET collection endpoints for common collections
 - methods: ["GET"]
   pattern: "^/api/Institutes/$"
   mcp_type: TOOL
@@ -217,23 +232,19 @@ Route maps are an array of objects, each with:
   tags: ["Student"]
   mcp_tags: ["Students entrypoints"]
 
+# Expose GET item-by-id endpoints (powers the GET_*_WithId tools).
+# \{[^/]+\} matches a single path parameter such as /api/Institutes/{id}/.
 - methods: ["GET"]
-  pattern: "^/api/StudyPrograms/$"
+  pattern: "^/api/(Institutes|Students|StudyPrograms|Courses)/\\{[^/]+\\}/?$"
   mcp_type: TOOL
-  tags: ["StudyProgram"]
-  mcp_tags: ["Study programs entrypoints"]
 
-- methods: ["GET"]
-  pattern: "^/api/Courses/$"
-  mcp_type: TOOL
-  tags: ["Course"]
-  mcp_tags: ["Courses entrypoints"]
-
-# Fallback: exclude everything else
+# Explicit catch-all: exclude everything else (keep this LAST)
 - methods: "*"
   pattern: ".*"
   mcp_type: EXCLUDE
 ```
+
+See the shipped [`route_maps.yaml`](route_maps.yaml) for the full read-only set.
 
 Route maps loaded from `FASTMCP_ROUTE_MAPS_FILE` have lower priority than those from `FASTMCP_ROUTE_MAPS` (env var), unless `env_overrides_file` is set to `False`.
 
@@ -286,9 +297,13 @@ Returns "ΔΗΜΟΚΡΙΤΕΙΟ ΠΑΝΕΠΙΣΤΗΜΙΟ ΘΡΑΚΗΣ".
 
 ### List students with filter
 
+The `Student` entity exposes the department as the **`department`** attribute (a
+numeric id) — there is no `departmentId` field, so filtering on `departmentId`
+returns a `500 ERR_ATTR_UNKNOWN` from the API.
+
 ```
 GET_Students
-  $filter: "departmentId eq 170"
+  $filter: "department eq 170"
   $top: 10
 ```
 
@@ -302,10 +317,35 @@ GET_Students_WithId
 
 ### Create/update institute
 
+> ⚠️ Write endpoints are **not** exposed by the shipped read-only `route_maps.yaml`.
+> Enable them first (see [Enabling write endpoints](#enabling-write-endpoints)).
+
 ```
 POST_Institutes
   body: { ... Institute JSON ... }
 ```
+
+#### Enabling write endpoints
+
+Add a rule **above** the final `EXCLUDE` rule in your route maps, e.g.:
+
+```yaml
+# Allow create/update on Institutes
+- methods: ["POST", "PUT"]
+  pattern: "^/api/Institutes/(\\{[^/]+\\}/)?$"
+  mcp_type: TOOL
+  tags: ["Institute"]
+```
+
+## Running the tests
+
+```bash
+uv run --with fastmcp --with httpx --with authlib --with python-dotenv \
+  --with pyyaml --with pytest pytest -q
+```
+
+The suite (`tests/test_fixes.py`) covers the auth token handling, the OpenAPI
+parameter sanitizer, and the tool-name pluralizer.
 
 ## Project Structure
 
@@ -313,7 +353,10 @@ POST_Institutes
 Universis-MCP/
 ├── universis_mcp_server.py   # The MCP server
 ├── README.md                 # This file
-└── route_maps.yaml           # Example route maps (optional)
+├── route_maps.yaml           # Example route maps (optional)
+├── CHANGELOG.md              # Release notes
+└── tests/
+    └── test_fixes.py         # Regression tests
 ```
 
 ## Architecture

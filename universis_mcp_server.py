@@ -1,4 +1,3 @@
-from http import client
 import os
 import asyncio
 import logging
@@ -19,6 +18,8 @@ from fastmcp.server.providers.openapi import (
 )
 from fastmcp.server.dependencies import get_http_headers
 from authlib.integrations.httpx_client import AsyncOAuth2Client
+
+__version__ = "0.2.2"
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Environment & logging
@@ -62,7 +63,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
 logging.basicConfig(level=numeric_level)
 logger = logging.getLogger("Universis-API-Server")
-logger.info(f"✅ Logging level set to {LOG_LEVEL}")
+logger.info(f"✅ Universis MCP Server v{__version__} — logging level set to {LOG_LEVEL}")
 
 # Silence noisy docket logs
 for name in ("docket", "docket.worker", "docket.scheduler"):
@@ -580,10 +581,16 @@ class TokenManager:
                 logger.debug("[AUTH] Userinfo/Introspection fetch threw: %s", e)
             return token
 
-        # No token → surface provider errors (if any)
+        # No token → surface provider errors (if any) and fail loudly.
+        # Returning None here would propagate as a literal "Bearer None"
+        # Authorization header downstream, producing a confusing 401.
         err  = tok.get("error")
         desc = tok.get("error_description")
-        logger.debug("Token fetch failed. error=%s, description=%s", err, desc)
+        logger.error("Token fetch failed. error=%s, description=%s", err, desc)
+        raise RuntimeError(
+            f"Failed to obtain an access token from {self.token_url}. "
+            f"error={err}, description={desc}"
+        )
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CleaningAsyncClient (no auth logic inside; uses request hook to inject token)
@@ -611,14 +618,29 @@ class CleaningAsyncClient(httpx.AsyncClient):
         if AUTH_MODE == "bearer":
             mcp_headers = get_http_headers(include={"authorization"})
             if "authorization" in mcp_headers:
-                a = mcp_headers["authorization"]
-                logger.debug("[AUTH] Bearer passthrough: %s ...", a[:20])
-                request.headers["Authorization"] = a
+                # Do not log any portion of the token, even at DEBUG.
+                logger.debug("[AUTH] Bearer passthrough from MCP transport")
+                request.headers["Authorization"] = mcp_headers["authorization"]
                 return
+            # No inbound Authorization header. We can only fall back to the
+            # OAuth2 token supplier if one was actually configured; in pure
+            # bearer mode it is None, so calling it would raise TypeError.
+            if self._token_supplier is None:
+                raise RuntimeError(
+                    "AUTH_MODE='bearer' but the incoming MCP request carried no "
+                    "Authorization header and no OAuth2 token supplier is configured. "
+                    "Provide a Bearer token from the MCP client, or set AUTH_MODE='oauth2'."
+                )
             logger.warning(
                 "[AUTH] AUTH_MODE='bearer' but no Authorization header in MCP transport"
             )
             logger.info("[AUTH] Falling back to OAuth2 token supplier")
+
+        if self._token_supplier is None:
+            raise RuntimeError(
+                "No OAuth2 token supplier configured and no Bearer token available "
+                "to authenticate the upstream request."
+            )
         token = await self._token_supplier()
         logger.debug("[AUTH] Injecting bearer token for %s", request.url)
         request.headers["Authorization"] = f"Bearer {token}"
@@ -704,10 +726,12 @@ def pluralize(word: str) -> str:
         return word[:-1] + 'ies'   # entry -> entries
     if word.endswith('sh') or word.endswith('ch') or word.endswith('ss') or word.endswith('x'):
         return word + 'es'         # class -> classes
-    if word.endswith('f'):
-        return word[:-1] + 'ves'   # leaf -> leaves
+    # Check the 'ff' case before the single-'f' case, otherwise 'f' matches
+    # first and 'staff' becomes 'stafves'.
     if word.endswith('ff'):
         return word + 's'          # staff -> staffs
+    if word.endswith('f'):
+        return word[:-1] + 'ves'   # leaf -> leaves
     return word + 's'
 
 def clean_segment(segment: str) -> str:
@@ -829,7 +853,10 @@ def sanitize_openapi_for_fastmcp(spec: Dict[str, Any]) -> Dict[str, Any]:
                         sch["format"] = "uuid"
                     elif "date" in lname:
                         sch["format"] = "date"
-                    elif lname in {"recursiveDelete", "directsupervisingrolesonly", "directonly", "onlydirectsupervision"}:
+                    elif lname in {"recursivedelete", "directsupervisingrolesonly", "directonly", "onlydirectsupervision"}:
+                        # Compare against the lowercased name; entries here must
+                        # be lowercase or they can never match (e.g. the old
+                        # camelCase "recursiveDelete" was dead).
                         sch = {"type": "boolean"}
                     p["schema"] = sch
             # ensure all templated path params exist

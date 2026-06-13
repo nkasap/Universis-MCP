@@ -1,15 +1,25 @@
 # Route maps for Universis MCP Server
 # Controls which OpenAPI endpoints become MCP tools.
-# First match wins. Default fallback is TOOL.
-# 
+#
+# IMPORTANT: order matters — FIRST MATCH WINS. The explicit EXCLUDE rule at the
+# bottom is the catch-all: anything not matched by a rule above it is dropped.
+# Do not rely on FastMCP's implicit "default = TOOL" behaviour; the trailing
+# EXCLUDE makes the policy explicit and keeps Universis' ~3000 endpoints from
+# all being exposed as tools.
+#
+# This shipped example is READ-ONLY: it exposes GET collection endpoints and
+# GET item-by-id endpoints for the common registrar entities. Write methods
+# (POST/PUT/DELETE) are intentionally excluded by the catch-all. To enable a
+# write endpoint, add a rule for it ABOVE the final EXCLUDE rule.
+#
 # Format:
 #   methods: HTTP method(s) or "*" for all
-#   pattern: Python regex matched against the raw path
+#   pattern: Python regex matched against the raw path (e.g. ^/api/Students/$)
 #   mcp_type: TOOL, RESOURCE, RESOURCE_TEMPLATE, or EXCLUDE
 #   tags: FastMCP tags
 #   mcp_tags: MCP protocol tags
 
-# ─── Collection endpoints (list) ─────────────────────────────────────
+# ─── Collection endpoints (list, e.g. GET_Students) ──────────────────
 - methods: ["GET"]
   pattern: "^/api/AcademicPeriods/$"
   mcp_type: TOOL
@@ -94,12 +104,23 @@
   tags: ["StudentPeriodRegistration"]
   mcp_tags: ["Students entrypoints"]
 
+# ─── Item endpoints (GET by id, e.g. GET_Students_WithId) ────────────
+# Matches a single path parameter such as /api/Institutes/{id}/.
+# These power the README "..._WithId" examples (GET_Institutes_WithId,
+# GET_Students_WithId, etc.).
+- methods: ["GET"]
+  pattern: "^/api/(AcademicPeriods|AcademicYears|Institutes|Persons|Personnels|StudyPrograms|Courses|CourseTypes|CourseClasses|CourseExams|Departments|Students|StudentRequestActions|StudentPeriodRegistrations)/\\{[^/]+\\}/?$"
+  mcp_type: TOOL
+
 # ─── Pattern: all Student* collections ─────────────────────────────
 - methods: ["GET"]
   pattern: "^/api/Student[^/]+/?$"
   mcp_type: TOOL
 
-# ─── Fallback: exclude everything else ──────────────────────────────
+# ─── Explicit catch-all: EXCLUDE everything else ────────────────────
+# Keep this LAST. It guarantees that any endpoint not matched above
+# (including all POST/PUT/DELETE write operations) is excluded rather
+# than silently exposed as a tool.
 - methods: "*"
   pattern: ".*"
   mcp_type: EXCLUDE
