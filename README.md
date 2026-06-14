@@ -337,6 +337,42 @@ Add a rule **above** the final `EXCLUDE` rule in your route maps, e.g.:
   tags: ["Institute"]
 ```
 
+#### Writing data: Universis/`@themost` conventions
+
+The Universis backend is built on [`@themost`](https://github.com/themost-framework),
+which has a couple of save semantics worth knowing when you call the write tools.
+These are **server-side business rules**, not MCP behaviour — the MCP tool simply
+forwards your JSON body to the API.
+
+- **Inserts of client-keyed entities need `"$state": 1`.** Entities whose primary
+  key is assigned by the client (e.g. `Course`, where `id` is the course code)
+  are treated as *updates* by default, so a plain insert fails with
+  `E_PREVIOUS` ("The previous state of the object cannot be determined"). Add
+  `"$state": 1` to the posted object to force an insert. Entities with
+  server-generated numeric keys (post without an `id`) do not need this.
+
+  ```jsonc
+  // POST_Courses  (collection endpoint takes an array body)
+  {
+    "body": [
+      { "$state": 1, "id": "DEMO01", "displayCode": "D01",
+        "name": "Demo course", "department": "999",
+        "isEnabled": true, "isShared": false }
+    ]
+  }
+  ```
+
+- **Updates only change the fields you send**, but some fields are immutable once
+  set (e.g. `Course.courseStructureType` → `"Structure type cannot be changed"`).
+  The safe pattern for a partial edit is: read the current object, change the one
+  field, and post the whole object back so nothing else looks like it changed.
+
+- **Deletes** use the item tool with the id in the path, e.g.
+  `DELETE_Courses_WithId { "id": 990002 }`.
+
+> Tip: scope write/delete route maps tightly (e.g. a single test department) while
+> you are experimenting — see the dept-scoped examples above.
+
 ## Running the tests
 
 ```bash

@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.3.0 (unreleased)
+## v0.3.0
 
 ### Changed
 - **Stop stripping `$ref`s from the OpenAPI spec.** Previous versions ran
@@ -29,6 +29,15 @@
   the build robust across FastMCP versions.
 - `tests/test_refs.py` — covers ref preservation, dangling-ref replacement, and the
   no-op case.
+- **Docs: Universis/`@themost` write conventions** — documented that client-keyed
+  inserts (e.g. `Course`) require `"$state": 1`, that some fields are immutable on
+  update, and the safe partial-update pattern.
+
+### Validation
+- Verified end-to-end against the live Universis API (read + write) on a test
+  department: `GET` reads, a `POST` insert/update on a previously "empty-body"
+  endpoint (now carrying a populated request-body schema), and a `DELETE` all
+  succeed through the MCP server.
 
 ### Notes
 - `clean_refs` is retained and still applied to HTTP **responses** (unchanged); it
