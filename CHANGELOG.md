@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.4.0 (unreleased)
+
+### Added
+- **Schema blueprints** — GET tool descriptions are now enriched with a compact,
+  agent-facing field blueprint derived from `components/schemas` (entity scalar
+  fields + associations + `$filter` operator hints), so an agent can build valid
+  `$filter`/`$select`/`$orderby`/`$expand` instead of guessing field names.
+- **Per-tool verbosity** via `schema_detail: off|ref|compact|full` in route maps,
+  plus global env defaults `TOOL_SCHEMA_DETAIL` (default `compact`) and
+  `TOOL_SCHEMA_MAX_FIELDS` (default 25).
+- **Opt-in MCP resources** (`SCHEMA_RESOURCES=true`): a slim `schema://{entity}`
+  resource template and a shared `odata://filter-help` resource. The `schema://`
+  link is only surfaced when a tool description was truncated (greed mitigation),
+  and the resource returns a bounded field table, not the raw schema.
+- **Access log** (`ACCESS_LOG=<path>`): optional JSONL of tool API calls and
+  resource reads (name + bytes) for measuring agent "greed" and payload pressure
+  during local-model evaluation, independent of the agent host.
+- `tests/test_blueprints.py`; `eval/` scaffold (benchmark tasks + access-log parser).
+
+### Notes
+- No API or auth behaviour changes; all new behaviour is additive and defaults to
+  the same tool surface as v0.3.0 plus the (description-only) blueprints.
+
 ## v0.3.0
 
 ### Changed

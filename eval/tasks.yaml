@@ -1,0 +1,40 @@
+# Read-only benchmark tasks for evaluating schema-blueprint enrichment.
+# Drive these through your MCP host (Hermes-Agent) with each local model as the
+# brain. Every task is a GET; none mutate data. The point is to measure whether
+# the enriched descriptions let the model build VALID OData queries.
+#
+# For each task record: the tool chosen, the args (esp. $filter), whether the API
+# returned 200 (valid) vs 500 ERR_ATTR_UNKNOWN (hallucinated field), whether the
+# model read a schema:// resource, prompt tokens, and success.
+
+- id: students-by-department
+  prompt: "List 10 students of department 170."
+  expect_tool: GET_Students
+  expect_filter_field: department          # NOT 'departmentId' (the classic trap)
+  trap_field: departmentId
+
+- id: academic-period-by-name
+  prompt: "Find the academic period whose name contains 'Εαρ'."
+  expect_tool: GET_AcademicPeriods
+  expect_filter_field: name
+
+- id: courses-by-ects
+  prompt: "List courses with more than 5 ECTS, ordered by name."
+  expect_tool: GET_Courses
+  expect_filter_field: ects
+  expect_orderby_field: name
+
+- id: select-projection
+  prompt: "List 5 institutes returning only their id and name."
+  expect_tool: GET_Institutes
+  expect_select_fields: [id, name]
+
+- id: expand-association
+  prompt: "Get student 77434 including their person details."
+  expect_tool: GET_Students_WithId
+  expect_expand_field: person
+
+- id: department-by-org
+  prompt: "List departments and show each one's organization."
+  expect_tool: GET_Departments
+  # 'organization' is an association id on Department; tests association awareness

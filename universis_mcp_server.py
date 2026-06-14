@@ -19,7 +19,7 @@ from fastmcp.server.providers.openapi import (
 from fastmcp.server.dependencies import get_http_headers
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Environment & logging
@@ -45,6 +45,21 @@ AUTH_MODE=os.getenv('AUTH_MODE', 'oauth2').lower().strip()  # 'oauth2' | 'bearer
 
 raw_required_scope = os.getenv('REQUIRED_SCOPES', '')
 REQUIRED_SCOPES    = set([s.strip() for s in re.split(r'[,\s]+', raw_required_scope) if s.strip()])
+
+# ── Schema-blueprint config (enrich GET tool descriptions from components/schemas)
+TOOL_SCHEMA_DETAIL = os.getenv('TOOL_SCHEMA_DETAIL', 'compact').lower().strip()  # off|ref|compact|full
+try:
+    TOOL_SCHEMA_MAX_FIELDS = int(os.getenv('TOOL_SCHEMA_MAX_FIELDS', '25'))
+except ValueError:
+    TOOL_SCHEMA_MAX_FIELDS = 25
+SCHEMA_RESOURCES = os.getenv('SCHEMA_RESOURCES', 'false').lower() in {'1', 'true', 'yes'}
+ACCESS_LOG = os.getenv('ACCESS_LOG')  # path to a JSONL access log (greed/payload metrics); off if unset
+
+# Populated in main() before from_openapi; consumed by customize_components/resources.
+SCHEMAS: Dict[str, Any] = {}
+_ROUTE_MAPS_ORDERED: List[Any] = []
+_DETAIL_BY_KEY: Dict[Any, str] = {}
+_VALID_DETAILS = {'off', 'ref', 'compact', 'full'}
 
 
 TOKEN_AUTH_METHOD   = os.getenv('TOKEN_AUTH_METHOD', "client_secret_post")  # e.g., client_secret_post | client_secret_basic
@@ -142,15 +157,23 @@ def _parse_route_maps(data: Any, origin: str) -> List[RouteMap]:
         mcp_type = _to_mcp_type(item.get("mcp_type", "TOOL"))
         tags = set(_ensure_str_list(item.get("tags"), f"{origin}[{i}].tags"))
         mcp_tags = set(_ensure_str_list(item.get("mcp_tags"), f"{origin}[{i}].mcp_tags"))
-        maps.append(
-            RouteMap(
-                methods=methods,
-                pattern=pattern,
-                mcp_type=mcp_type,
-                tags=tags,
-                mcp_tags=mcp_tags,
-            )
+        rm = RouteMap(
+            methods=methods,
+            pattern=pattern,
+            mcp_type=mcp_type,
+            tags=tags,
+            mcp_tags=mcp_tags,
         )
+        maps.append(rm)
+        # Optional per-tool blueprint verbosity (off|ref|compact|full); first match wins.
+        detail = item.get("schema_detail")
+        if detail is not None:
+            detail = str(detail).lower().strip()
+            if detail not in _VALID_DETAILS:
+                raise ValueError(
+                    f"{origin}[{i}].schema_detail must be one of {sorted(_VALID_DETAILS)}"
+                )
+            _DETAIL_BY_KEY.setdefault(_route_map_key(rm), detail)
     logger.debug("Parsed %d RouteMaps from %s", len(maps), origin)
     return maps
 
@@ -241,6 +264,7 @@ def load_combined_route_maps(
     env_overrides_file: bool = True,
     dedupe: bool = True,
 ) -> List[RouteMap]:
+    _DETAIL_BY_KEY.clear()  # rebuilt during _parse_route_maps below
     file_maps = load_route_maps_from_file(file_var)
     env_maps = load_route_maps_from_env(env_var)
     merged = merge_route_maps(
@@ -648,6 +672,13 @@ class CleaningAsyncClient(httpx.AsyncClient):
     async def send(self, request: httpx.Request, *args, **kwargs) -> httpx.Response:
         # Delegate to base AsyncClient
         response = await super().send(request, *args, **kwargs)
+        if ACCESS_LOG:
+            try:
+                _access_log({"kind": "api_call", "method": request.method,
+                             "url": str(request.url), "status": response.status_code,
+                             "bytes": len(response.content or b"")})
+            except Exception:
+                pass
         # Debug log (optional)
         if logger.isEnabledFor(logging.DEBUG):
             try:
@@ -755,6 +786,152 @@ def generate_summary(method: str, path: str, tags: list, summary: str) -> str:
         return f"Retrieve {trailing_clean} for {entity_singular}"
     return summary
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Schema blueprints — turn components/schemas into agent-facing field hints
+# ───────────────────────────────────────────────────────────────────────────────
+AUDIT_FIELDS = {"datecreated", "datemodified", "createdby", "modifiedby"}
+
+ODATA_HELP = (
+    "OData query help for Universis collection (GET) tools:\n"
+    "- $filter: boolean expression over entity fields. Operators: eq ne gt ge lt le, "
+    "and or not, and functions contains(field,'x'), startswith(field,'x'), endswith(field,'x').\n"
+    "  Strings in single quotes ('value'); numbers/booleans bare; dates ISO (yyyy-MM-dd).\n"
+    "  Associations: filter by id directly (e.g. department eq 170) or by nested field "
+    "(department/name eq 'X').\n"
+    "- $select: comma-separated field names to return.\n"
+    "- $orderby: '<field> asc|desc'.\n"
+    "- $expand: comma-separated association names to inline.\n"
+    "- $top / $skip: paging.\n"
+)
+
+
+def _access_log(record: Dict[str, Any]) -> None:
+    """Append a JSONL record to ACCESS_LOG (greed/payload metrics). No-op if unset."""
+    if not ACCESS_LOG:
+        return
+    try:
+        with open(ACCESS_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), **record}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _field_type(v: Dict[str, Any]) -> str:
+    t = v.get("type", "object")
+    s = f"{t}/{v['format']}" if v.get("format") else str(t)
+    return s + ("?" if v.get("nullable") else "")
+
+
+def classify_fields(entity: str):
+    """Split an entity's properties into (scalars, associations, audit) lists of (name, type)."""
+    props = (SCHEMAS.get(entity, {}) or {}).get("properties", {}) or {}
+    scalars, assocs, audit = [], [], []
+    for k, v in props.items():
+        if not isinstance(v, dict):
+            continue
+        if "$ref" in v:
+            assocs.append((k, v["$ref"].rsplit("/", 1)[-1]))
+        elif v.get("type") == "array":
+            items = v.get("items", {})
+            if isinstance(items, dict) and "$ref" in items:
+                tgt = items["$ref"].rsplit("/", 1)[-1]
+            else:
+                tgt = items.get("type", "object") if isinstance(items, dict) else "object"
+            assocs.append((k, f"[]{tgt}"))
+        elif k.lower() in AUDIT_FIELDS:
+            audit.append((k, _field_type(v)))
+        else:
+            scalars.append((k, _field_type(v)))
+    return scalars, assocs, audit
+
+
+def resolve_entity(route: Any) -> str | None:
+    """Map a route to its component-schema name (tag → path fallback)."""
+    for t in (getattr(route, "tags", None) or []):
+        if t in SCHEMAS:
+            return t
+    path = getattr(route, "path", "") or ""
+    segs = [s for s in path.strip("/").split("/") if s and not s.startswith("{")]
+    if segs and segs[0] == "api":
+        segs = segs[1:]
+    if segs:
+        for cand in (singularize(segs[0]), segs[0]):
+            if cand in SCHEMAS:
+                return cand
+    return None
+
+
+def detail_for(method: str, path: str) -> str:
+    """Per-tool blueprint verbosity: first matching route map's schema_detail, else default."""
+    for m in _ROUTE_MAPS_ORDERED:
+        meths = getattr(m, "methods", "*")
+        if meths != "*" and method.upper() not in meths:
+            continue
+        try:
+            if re.search(getattr(m, "pattern", ".*"), path):
+                return _DETAIL_BY_KEY.get(_route_map_key(m), TOOL_SCHEMA_DETAIL)
+        except re.error:
+            continue
+    return TOOL_SCHEMA_DETAIL
+
+
+def build_blueprint(entity: str | None, detail: str) -> str:
+    """Render a compact, token-aware field blueprint to append to a GET tool description."""
+    if not entity or detail == "off" or entity not in SCHEMAS:
+        return ""
+    if detail == "ref":
+        return f"\n\nEntity {entity}. Field schema: schema://{entity}" if SCHEMA_RESOURCES else ""
+    scalars, assocs, audit = classify_fields(entity)
+    if not scalars and not assocs:
+        return ""
+    cap = None if detail == "full" else max(1, TOOL_SCHEMA_MAX_FIELDS)
+    shown = scalars if cap is None else scalars[:cap]
+    more = 0 if cap is None else max(0, len(scalars) - len(shown))
+    out = [f"\n\nEntity {entity} — filterable & selectable fields ($filter/$select/$orderby):"]
+    out.append("  " + (", ".join(f"{n} ({t})" for n, t in shown) if shown else "(none)"))
+    if more:
+        out.append(f"  …and {more} more → schema://{entity}" if SCHEMA_RESOURCES
+                   else f"  …and {more} more field(s)")
+    if assocs:
+        out.append(f"Associations (use $expand, or filter by id e.g. `{assocs[0][0]} eq <id>`): "
+                   + ", ".join(n for n, _ in assocs))
+    if detail == "full" and audit:
+        out.append("Read-only/audit: " + ", ".join(n for n, _ in audit))
+    hint = ("$filter ops: eq ne gt ge lt le, and/or/not, contains/startswith/endswith; "
+            "strings in single quotes, dates ISO yyyy-MM-dd.")
+    if SCHEMA_RESOURCES:
+        hint += " See odata://filter-help."
+    out.append(hint)
+    return "\n".join(out)
+
+
+def slim_schema(entity: str) -> Dict[str, Any]:
+    """Bounded field table for the schema://{entity} resource (never the raw verbose schema)."""
+    sch = SCHEMAS.get(entity, {}) or {}
+    scalars, assocs, audit = classify_fields(entity)
+    return {
+        "entity": entity,
+        "required": sorted(sch.get("required", []) or []),
+        "fields": [{"name": n, "type": t} for n, t in scalars],
+        "associations": [{"name": n, "target": t} for n, t in assocs],
+        "audit": [n for n, _ in audit],
+    }
+
+
+def register_schema_resources(mcp: Any) -> None:
+    """Register the slim schema://{entity} template + odata://filter-help (opt-in)."""
+    @mcp.resource("schema://{entity}")
+    def entity_schema(entity: str) -> str:  # noqa: ANN001
+        out = json.dumps(slim_schema(entity), ensure_ascii=False, indent=2)
+        _access_log({"kind": "resource_read", "uri": f"schema://{entity}", "bytes": len(out)})
+        return out
+
+    @mcp.resource("odata://filter-help")
+    def odata_help() -> str:
+        _access_log({"kind": "resource_read", "uri": "odata://filter-help", "bytes": len(ODATA_HELP)})
+        return ODATA_HELP
+
+
 def customize_components(route: Any, component: OpenAPITool | OpenAPIResource | OpenAPIResourceTemplate) -> None:
     action = route.operation_id or route.path.split("/")[-1] or ""
     rec_object = route.operation_id or route.path.split("/")[2] or ""
@@ -792,6 +969,12 @@ def customize_components(route: Any, component: OpenAPITool | OpenAPIResource | 
                 param_details.append(f"- {k} ({v.get('type', 'unknown')}): {v.get('description', 'No description')}")
         if param_details:
             component.description += "\nParameters:\n" + "\n".join(param_details)
+
+        # Append entity field blueprint for GET tools (helps the agent build $filter/$select).
+        if (route.method or "").upper() == "GET":
+            blueprint = build_blueprint(resolve_entity(route), detail_for(route.method, route.path))
+            if blueprint:
+                component.description += blueprint
 
 # ── 2) Sanitizer tuned to your schema ──────────────────────────────────────────
 PATH_PARAM_RE = re.compile(r"\{([^}/]+)\}")
@@ -1035,6 +1218,13 @@ async def main():
         dedupe=True,
     )
 
+    # Expose component schemas + ordered route maps for blueprint enrichment.
+    global SCHEMAS, _ROUTE_MAPS_ORDERED
+    SCHEMAS = (openapi_spec.get("components", {}) or {}).get("schemas", {}) or {}
+    _ROUTE_MAPS_ORDERED = route_maps
+    logger.info("🧭 Schema blueprints: detail=%s, max_fields=%d, resources=%s (%d component schemas)",
+                TOOL_SCHEMA_DETAIL, TOOL_SCHEMA_MAX_FIELDS, SCHEMA_RESOURCES, len(SCHEMAS))
+
     # Normalize scopes into a space-delimited string for OAuth
     normalized_scope = " ".join(SCOPES) if SCOPES else None
 
@@ -1081,6 +1271,13 @@ async def main():
         # 'string'"). Disable enforcement; request-body schemas are unaffected.
         validate_output=False,
     )
+
+    if SCHEMA_RESOURCES:
+        try:
+            register_schema_resources(mcp)
+            logger.info("✅ Registered schema://{entity} template + odata://filter-help")
+        except Exception as e:
+            logger.warning("⚠️ Failed to register schema resources: %s", e)
 
     try:
     # ✅ CONFIGURABLE TRANSPORT LOGIC (NEW)

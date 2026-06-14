@@ -215,6 +215,7 @@ Route maps are an array of objects, each with:
 | `mcp_type` | string | `TOOL` | `TOOL`, `RESOURCE`, `RESOURCE_TEMPLATE`, or `EXCLUDE` |
 | `tags` | string[] | `[]` | FastMCP tags for the generated tool |
 | `mcp_tags` | string[] | `[]` | MCP protocol-level tags |
+| `schema_detail` | string | (env default) | Per-tool blueprint verbosity for GET tools: `off`, `ref`, `compact`, or `full` (see [Schema blueprints](#schema-blueprints)) |
 
 ### Example `route_maps.yaml`
 
@@ -253,6 +254,53 @@ Route maps loaded from `FASTMCP_ROUTE_MAPS_FILE` have lower priority than those 
 ```bash
 export FASTMCP_ROUTE_MAPS='[{"methods":"*","pattern":".*\\/Me\\/.*","mcp_type":"EXCLUDE","mcp_tags":["MCP_EXCLUDED"]}]'
 ```
+
+## Schema blueprints
+
+Universis' OpenAPI spec has no `operationId`s and (historically) opaque parameters,
+so an agent couldn't tell which fields an entity has — leading to invalid filters
+like `departmentId eq 170` (the real field is `department`). Since the server now
+keeps `components/schemas` (v0.3.0), each **GET** tool's description is enriched
+with a compact **field blueprint** derived from the entity schema, so the agent
+knows what to put in `$filter` / `$select` / `$orderby` / `$expand`.
+
+Example (appended to `GET_AcademicPeriods`):
+
+```
+Entity AcademicPeriod — filterable & selectable fields ($filter/$select/$orderby):
+  id (integer), name (string), alternateName (string), description (string), url (string), ...
+Associations (use $expand, or filter by id e.g. `locale eq <id>`): locale, locales
+$filter ops: eq ne gt ge lt le, and/or/not, contains/startswith/endswith; strings in single quotes, dates ISO yyyy-MM-dd.
+```
+
+### Verbosity & token control
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOOL_SCHEMA_DETAIL` | `compact` | Global default detail: `off` (no block), `ref` (pointer to `schema://Entity`), `compact` (capped field list), `full` (all fields + audit) |
+| `TOOL_SCHEMA_MAX_FIELDS` | `25` | In `compact`, cap the scalar field list; the rest are summarised as "…and N more" |
+| `SCHEMA_RESOURCES` | `false` | If `true`, also expose an MCP resource template `schema://{entity}` (slim field table) and a shared `odata://filter-help` resource |
+
+Per-tool override via the `schema_detail` field in a route map (route maps already
+curate the toolset, so this is where the token budget is best spent — give `full`
+to a few central entities and `off` to lookups the agent never filters):
+
+```yaml
+- methods: ["GET"]
+  pattern: "^/api/Students/$"
+  mcp_type: TOOL
+  schema_detail: full          # central entity → all fields
+
+- methods: ["GET"]
+  pattern: "^/api/AcademicYears/$"
+  mcp_type: TOOL
+  schema_detail: off           # lookup → no field block
+```
+
+> **Greed note.** The `schema://{entity}` resource link is only shown when a
+> description was actually truncated (large entities), so small entities give the
+> agent no reason to fetch. The resource itself returns a *slim field table*, not
+> the raw schema, so even an over-eager client can't blow the context window.
 
 ## How Tool Names Are Generated
 

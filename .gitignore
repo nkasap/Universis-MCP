@@ -10,3 +10,6 @@ venv/
 .env
 *.env
 !.env.example
+
+# Eval run artifacts (access logs)
+eval/*.jsonl
