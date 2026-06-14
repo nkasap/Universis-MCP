@@ -19,7 +19,7 @@ from fastmcp.server.providers.openapi import (
 from fastmcp.server.dependencies import get_http_headers
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Environment & logging
@@ -882,6 +882,60 @@ def normalize_null_strings(obj: Any, keys: Iterable[str] = ("summary", "descript
     return obj
 
 # ───────────────────────────────────────────────────────────────────────────────
+# Dangling-$ref repair (replaces the old, lossy clean_refs() on the spec)
+# ───────────────────────────────────────────────────────────────────────────────
+def repair_dangling_refs(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace ONLY unresolvable internal $refs with a permissive object placeholder.
+
+    The Universis OpenAPI generator emits a handful of $refs to component schemas
+    it never actually defines (e.g. ``#/components/schemas/Object``). Older FastMCP
+    (<3) aborted the whole build on the first such pointer, which is why the spec
+    used to be flattened with clean_refs() — at the cost of destroying every
+    request-body schema. FastMCP 3.x resolves valid $refs itself and tolerates
+    bad ones, so instead of stripping all 4800+ refs we surgically neutralise only
+    the unresolvable ones: pop the bad ``$ref`` and leave a generic ``object`` in
+    its place. Every valid $ref is preserved for FastMCP to resolve, which is what
+    restores the request-body field contracts on POST endpoints.
+
+    Mutates and returns ``spec``.
+    """
+    schemas = spec.get("components", {}).get("schemas", {})
+    known = set(schemas) if isinstance(schemas, dict) else set()
+    repaired = 0
+    missing: set = set()
+
+    def walk(node: Any) -> None:
+        nonlocal repaired
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                target = ref.rsplit("/", 1)[-1]
+                if target not in known:
+                    missing.add(target)
+                    repaired += 1
+                    node.pop("$ref")
+                    node.setdefault("type", "object")
+                    desc = node.get("description") or ""
+                    suffix = f" (unresolved schema '{target}' replaced with a generic object)"
+                    node["description"] = (desc + suffix).strip()
+                    return  # placeholder is terminal; nothing deeper to walk
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(spec)
+    if repaired:
+        logger.warning(
+            "🩹 Repaired %d dangling $ref(s) to %d undefined schema(s): %s",
+            repaired, len(missing), ", ".join(sorted(missing)),
+        )
+    else:
+        logger.info("✅ No dangling $refs found in OpenAPI spec")
+    return spec
+
+# ───────────────────────────────────────────────────────────────────────────────
 # Fetch OpenAPI doc (kept as in your original; placed here for completeness)
 # ───────────────────────────────────────────────────────────────────────────────
 async def load_openapi_doc(base_url: str, path: str) -> dict:
@@ -967,10 +1021,12 @@ def inject_operation_ids(spec: dict) -> dict:
 # ───────────────────────────────────────────────────────────────────────────────
 async def main():
     openapi_spec = await load_openapi_doc(BASE_URL, SCHEMA_PATH)
-    openapi_spec = inject_operation_ids(openapi_spec)  # ← Add BEFORE sanitize! 
+    openapi_spec = inject_operation_ids(openapi_spec)  # ← Add BEFORE sanitize!
     openapi_spec = sanitize_openapi_for_fastmcp(openapi_spec)
-    openapi_spec = clean_refs(openapi_spec)  # ← Add this
-    openapi_spec = normalize_null_strings(openapi_spec)  # ← Then this
+    # Keep valid $refs (FastMCP 3.x resolves them, restoring request-body schemas);
+    # only neutralise the spec's handful of unresolvable refs.
+    openapi_spec = repair_dangling_refs(openapi_spec)
+    openapi_spec = normalize_null_strings(openapi_spec)
 
     route_maps = load_combined_route_maps(
         env_var="FASTMCP_ROUTE_MAPS",
@@ -1018,6 +1074,12 @@ async def main():
         name=SERVERNAME,
         mcp_component_fn=customize_components,
         route_maps=route_maps,
+        # The Universis spec declares many fields as `string` without
+        # `nullable: true`, but the API legitimately returns `null` for them.
+        # Now that we keep response schemas (no more blanket clean_refs), strict
+        # output validation would reject valid responses ("None is not of type
+        # 'string'"). Disable enforcement; request-body schemas are unaffected.
+        validate_output=False,
     )
 
     try:

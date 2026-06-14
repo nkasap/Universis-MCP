@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.3.0 (unreleased)
+
+### Changed
+- **Stop stripping `$ref`s from the OpenAPI spec.** Previous versions ran
+  `clean_refs` over the spec, deleting every `$ref`/`$defs` to avoid the hard
+  build failures that FastMCP <3 raised on the first unresolvable reference. That
+  also erased every request-body schema, so POST tools were created with empty
+  inputs. FastMCP 3.x resolves valid refs natively and tolerates bad ones, so the
+  spec pipeline now keeps valid refs — restoring request-body field schemas on
+  write endpoints (e.g. `POST_*_WithId` now exposes the entity's typed fields
+  instead of nothing).
+
+- **Disable output validation (`validate_output=False`).** Keeping response
+  schemas means FastMCP would otherwise validate API responses against them, and
+  the Universis spec declares many fields as `string` without `nullable: true`
+  while the API legitimately returns `null` (e.g. `GET_Students` failed with
+  "None is not of type 'string'"). Structured-output *typing* is still available
+  to clients; it is simply no longer *enforced*. Request-body schemas are
+  unaffected.
+
+### Added
+- **`repair_dangling_refs`** — surgically replaces only the spec's *unresolvable*
+  internal `$ref`s (the Universis generator emits ~15 references to schemas it
+  never defines, such as `Object`, `ContactPoint`, `GradeScaleValueLocale`) with a
+  generic `object` placeholder, and logs the repaired set at startup. Valid refs
+  are left intact. This avoids dropping or guessing whole endpoints while keeping
+  the build robust across FastMCP versions.
+- `tests/test_refs.py` — covers ref preservation, dangling-ref replacement, and the
+  no-op case.
+
+### Notes
+- `clean_refs` is retained and still applied to HTTP **responses** (unchanged); it
+  is simply no longer applied to the **spec**.
+
 ## v0.2.2
 
 ### Fixed

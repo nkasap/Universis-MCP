@@ -356,7 +356,8 @@ Universis-MCP/
 ├── route_maps.yaml           # Example route maps (optional)
 ├── CHANGELOG.md              # Release notes
 └── tests/
-    └── test_fixes.py         # Regression tests
+    ├── test_fixes.py         # Regression tests (auth, sanitizer, pluralizer)
+    └── test_refs.py          # $ref preservation / dangling-ref repair
 ```
 
 ## Architecture
@@ -364,8 +365,18 @@ Universis-MCP/
 1. **Load OpenAPI spec** from `BASE_URL + SCHEMA_PATH` (JSON or YAML)
 2. **Inject operationIds** — generate human-readable names
 3. **Sanitize** — fix common OpenAPI spec issues (empty required fields, missing schemas)
-4. **Clean refs** — remove `$ref` and `$defs` that FastMCP cannot resolve
+4. **Repair dangling refs** — keep all valid `$ref`s (FastMCP 3.x resolves them, which
+   is what gives POST tools their request-body field schemas) and replace only the
+   handful of unresolvable `$ref`s with a generic `object` placeholder
 5. **Filter with route maps** — choose which endpoints become tools
 6. **Authenticate** — OAuth2 client_credentials or bearer passthrough
 7. **Create FastMCP server** — using `FastMCP.from_openapi()`
 8. **Serve** — stdio or streamable HTTP transport
+
+> **Note on `$ref` handling (changed in v0.3.0).** Earlier versions stripped *all*
+> `$ref`/`$defs` from the spec because FastMCP <3 aborted the whole build on the
+> first unresolvable reference. That also destroyed every request-body schema, so
+> POST tools had empty inputs. FastMCP 3.x resolves valid refs itself and tolerates
+> bad ones, so the server now preserves valid refs and only neutralises the few
+> dangling ones (logged at startup). Response-body cleaning (`clean_refs`) is
+> unchanged and still applied to HTTP responses.
