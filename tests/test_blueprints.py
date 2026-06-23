@@ -23,6 +23,8 @@ def _schemas(monkeypatch):
     monkeypatch.setattr(srv, "TOOL_SCHEMA_DETAIL", "compact")
     monkeypatch.setattr(srv, "TOOL_SCHEMA_MAX_FIELDS", 25)
     monkeypatch.setattr(srv, "SCHEMA_RESOURCES", False)
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCE_ENTITIES", set())
+    monkeypatch.setattr(srv, "_EXPOSED_ENTITIES", set())
 
 
 def test_classify_fields_splits_scalar_assoc_audit():
@@ -67,7 +69,9 @@ def test_blueprint_truncation_gated_resource_link(monkeypatch):
     bp = srv.build_blueprint("Big", "compact")
     assert "…and 25 more" in bp and "schema://Big" not in bp
 
+    # resources on AND entity allowed (explicit allowlist) → link appears
     monkeypatch.setattr(srv, "SCHEMA_RESOURCES", True)
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCE_ENTITIES", {"Big"})
     bp = srv.build_blueprint("Big", "compact")
     assert "schema://Big" in bp
 
@@ -116,3 +120,39 @@ def test_invalid_schema_detail_raises():
     with pytest.raises(ValueError):
         srv._parse_route_maps(
             [{"methods": ["GET"], "pattern": ".*", "schema_detail": "verbose"}], "test")
+
+
+def test_allowed_entities_explicit_allowlist(monkeypatch):
+    monkeypatch.setattr(srv, "SCHEMAS", {"AcademicPeriod": ACADEMIC_PERIOD, "Student": {"properties": {}}})
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCE_ENTITIES", {"Student", "DoesNotExist"})
+    monkeypatch.setattr(srv, "_EXPOSED_ENTITIES", {"AcademicPeriod"})
+    # explicit list wins, intersected with known schemas (unknown skipped)
+    assert srv.allowed_resource_entities() == {"Student"}
+
+
+def test_allowed_entities_auto_restrict_to_exposed(monkeypatch):
+    monkeypatch.setattr(srv, "SCHEMAS", {"AcademicPeriod": ACADEMIC_PERIOD, "Student": {"properties": {}}})
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCE_ENTITIES", set())   # not set → auto
+    monkeypatch.setattr(srv, "_EXPOSED_ENTITIES", {"AcademicPeriod", "Ghost"})
+    # only exposed entities that actually exist as schemas
+    assert srv.allowed_resource_entities() == {"AcademicPeriod"}
+
+
+def test_resource_enabled_for_respects_allowlist(monkeypatch):
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCES", True)
+    monkeypatch.setattr(srv, "SCHEMAS", {"AcademicPeriod": ACADEMIC_PERIOD, "Student": {"properties": {}}})
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCE_ENTITIES", {"AcademicPeriod"})
+    assert srv.resource_enabled_for("AcademicPeriod") is True
+    assert srv.resource_enabled_for("Student") is False          # not in allowlist
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCES", False)
+    assert srv.resource_enabled_for("AcademicPeriod") is False   # resources off
+
+
+def test_truncation_link_suppressed_when_entity_not_allowed(monkeypatch):
+    big = {"required": [], "properties": {f"f{i}": {"type": "string"} for i in range(30)}}
+    monkeypatch.setattr(srv, "SCHEMAS", {"Big": big})
+    monkeypatch.setattr(srv, "TOOL_SCHEMA_MAX_FIELDS", 5)
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCES", True)
+    monkeypatch.setattr(srv, "SCHEMA_RESOURCE_ENTITIES", {"SomethingElse"})  # Big NOT allowed
+    bp = srv.build_blueprint("Big", "compact")
+    assert "…and 25 more" in bp and "schema://Big" not in bp

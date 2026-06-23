@@ -279,7 +279,8 @@ $filter ops: eq ne gt ge lt le, and/or/not, contains/startswith/endswith; string
 |----------|---------|-------------|
 | `TOOL_SCHEMA_DETAIL` | `compact` | Global default detail: `off` (no block), `ref` (pointer to `schema://Entity`), `compact` (capped field list), `full` (all fields + audit) |
 | `TOOL_SCHEMA_MAX_FIELDS` | `25` | In `compact`, cap the scalar field list; the rest are summarised as "…and N more" |
-| `SCHEMA_RESOURCES` | `false` | If `true`, also expose an MCP resource template `schema://{entity}` (slim field table) and a shared `odata://filter-help` resource |
+| `SCHEMA_RESOURCES` | `false` | If `true`, also expose concrete `schema://<Entity>` resources (slim field table) and a shared `odata://filter-help` resource |
+| `SCHEMA_RESOURCE_ENTITIES` | (unset) | Comma/space list of entities to expose as resources. **Unset → auto-restrict to entities that are exposed as tools.** Set → that explicit allowlist only (for env-only setups that don't use `route_maps.yaml`) |
 
 Per-tool override via the `schema_detail` field in a route map (route maps already
 curate the toolset, so this is where the token budget is best spent — give `full`
@@ -297,10 +298,19 @@ to a few central entities and `off` to lookups the agent never filters):
   schema_detail: off           # lookup → no field block
 ```
 
-> **Greed note.** The `schema://{entity}` resource link is only shown when a
-> description was actually truncated (large entities), so small entities give the
-> agent no reason to fetch. The resource itself returns a *slim field table*, not
-> the raw schema, so even an over-eager client can't blow the context window.
+Resources are a **bounded, discoverable** set (concrete `schema://<Entity>` entries
+in `list_resources`), not an open template — so a client cannot probe arbitrary
+entity names. Two complementary ways to choose the set:
+- **Auto (default):** only entities that are exposed as tools get a resource — the
+  set tracks your curated `route_maps.yaml` with no extra config.
+- **Explicit:** `SCHEMA_RESOURCE_ENTITIES="AcademicPeriod,Student"` — useful when
+  you configure purely via the MCP server's `env:` block and don't ship a YAML.
+
+> **Greed note.** The `schema://<Entity>` link inside a tool description is only
+> shown when that description was actually truncated *and* the entity has a
+> resource, so small/unselected entities give the agent no reason to fetch. The
+> resource itself returns a *slim field table*, not the raw schema, so even an
+> over-eager client can't blow the context window.
 
 ## How Tool Names Are Generated
 

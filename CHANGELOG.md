@@ -10,10 +10,13 @@
 - **Per-tool verbosity** via `schema_detail: off|ref|compact|full` in route maps,
   plus global env defaults `TOOL_SCHEMA_DETAIL` (default `compact`) and
   `TOOL_SCHEMA_MAX_FIELDS` (default 25).
-- **Opt-in MCP resources** (`SCHEMA_RESOURCES=true`): a slim `schema://{entity}`
-  resource template and a shared `odata://filter-help` resource. The `schema://`
-  link is only surfaced when a tool description was truncated (greed mitigation),
-  and the resource returns a bounded field table, not the raw schema.
+- **Opt-in MCP resources** (`SCHEMA_RESOURCES=true`): a bounded, discoverable set
+  of concrete `schema://<Entity>` resources (slim field table) + a shared
+  `odata://filter-help` resource. The `schema://` link is only surfaced when a
+  tool description was truncated and the entity has a resource (greed mitigation).
+  Which entities are exposed is selectable two ways: **auto-restrict to
+  tool-exposed entities** (default), or an explicit `SCHEMA_RESOURCE_ENTITIES`
+  allowlist (for env-only setups that don't use `route_maps.yaml`).
 - **Access log** (`ACCESS_LOG=<path>`): optional JSONL of tool API calls and
   resource reads (name + bytes) for measuring agent "greed" and payload pressure
   during local-model evaluation, independent of the agent host.

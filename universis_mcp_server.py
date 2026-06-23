@@ -53,10 +53,15 @@ try:
 except ValueError:
     TOOL_SCHEMA_MAX_FIELDS = 25
 SCHEMA_RESOURCES = os.getenv('SCHEMA_RESOURCES', 'false').lower() in {'1', 'true', 'yes'}
+# Optional explicit allowlist of entities to expose as schema:// resources.
+# If empty, falls back to auto-restrict (only entities exposed as tools).
+_raw_sre = os.getenv('SCHEMA_RESOURCE_ENTITIES', '')
+SCHEMA_RESOURCE_ENTITIES = set(s.strip() for s in re.split(r'[,\s]+', _raw_sre) if s.strip())
 ACCESS_LOG = os.getenv('ACCESS_LOG')  # path to a JSONL access log (greed/payload metrics); off if unset
 
 # Populated in main() before from_openapi; consumed by customize_components/resources.
 SCHEMAS: Dict[str, Any] = {}
+_EXPOSED_ENTITIES: set = set()  # entities resolved from the tools actually exposed
 _ROUTE_MAPS_ORDERED: List[Any] = []
 _DETAIL_BY_KEY: Dict[Any, str] = {}
 _VALID_DETAILS = {'off', 'ref', 'compact', 'full'}
@@ -879,8 +884,9 @@ def build_blueprint(entity: str | None, detail: str) -> str:
     """Render a compact, token-aware field blueprint to append to a GET tool description."""
     if not entity or detail == "off" or entity not in SCHEMAS:
         return ""
+    has_resource = resource_enabled_for(entity)
     if detail == "ref":
-        return f"\n\nEntity {entity}. Field schema: schema://{entity}" if SCHEMA_RESOURCES else ""
+        return f"\n\nEntity {entity}. Field schema: schema://{entity}" if has_resource else ""
     scalars, assocs, audit = classify_fields(entity)
     if not scalars and not assocs:
         return ""
@@ -890,7 +896,7 @@ def build_blueprint(entity: str | None, detail: str) -> str:
     out = [f"\n\nEntity {entity} — filterable & selectable fields ($filter/$select/$orderby):"]
     out.append("  " + (", ".join(f"{n} ({t})" for n, t in shown) if shown else "(none)"))
     if more:
-        out.append(f"  …and {more} more → schema://{entity}" if SCHEMA_RESOURCES
+        out.append(f"  …and {more} more → schema://{entity}" if has_resource
                    else f"  …and {more} more field(s)")
     if assocs:
         out.append(f"Associations (use $expand, or filter by id e.g. `{assocs[0][0]} eq <id>`): "
@@ -918,18 +924,61 @@ def slim_schema(entity: str) -> Dict[str, Any]:
     }
 
 
-def register_schema_resources(mcp: Any) -> None:
-    """Register the slim schema://{entity} template + odata://filter-help (opt-in)."""
-    @mcp.resource("schema://{entity}")
-    def entity_schema(entity: str) -> str:  # noqa: ANN001
-        out = json.dumps(slim_schema(entity), ensure_ascii=False, indent=2)
-        _access_log({"kind": "resource_read", "uri": f"schema://{entity}", "bytes": len(out)})
-        return out
+def allowed_resource_entities() -> set:
+    """Which entities get a schema:// resource.
 
+    Two complementary knobs:
+    - Explicit allowlist via SCHEMA_RESOURCE_ENTITIES (for env-only setups that
+      don't use route_maps.yaml) — authoritative when set.
+    - Otherwise auto-restrict to the entities actually exposed as tools, so the
+      resource set tracks the curated toolset with no extra config.
+    """
+    if SCHEMA_RESOURCE_ENTITIES:
+        allowed = set()
+        for e in SCHEMA_RESOURCE_ENTITIES:
+            if e in SCHEMAS:
+                allowed.add(e)
+            else:
+                logger.warning("SCHEMA_RESOURCE_ENTITIES: '%s' is not in components/schemas; skipping", e)
+        return allowed
+    return {e for e in _EXPOSED_ENTITIES if e in SCHEMAS}
+
+
+def resource_enabled_for(entity: str | None) -> bool:
+    """Whether a schema://{entity} resource will exist (used to gate description links)."""
+    if not SCHEMA_RESOURCES or not entity or entity not in SCHEMAS:
+        return False
+    if SCHEMA_RESOURCE_ENTITIES:
+        return entity in SCHEMA_RESOURCE_ENTITIES
+    return entity in _EXPOSED_ENTITIES
+
+
+def register_schema_resources(mcp: Any, entities: Iterable[str]) -> int:
+    """Register a bounded set of concrete schema://<Entity> resources + odata://filter-help.
+
+    Concrete (not a single open template) so the set is discoverable via
+    list_resources and a client cannot probe arbitrary entity names.
+    """
     @mcp.resource("odata://filter-help")
     def odata_help() -> str:
         _access_log({"kind": "resource_read", "uri": "odata://filter-help", "bytes": len(ODATA_HELP)})
         return ODATA_HELP
+
+    def _make_reader(e: str):
+        # Parameterless closure: a CONCRETE (non-template) resource must take no
+        # args, else FastMCP treats the parameter as a URI placeholder.
+        def reader() -> str:
+            out = json.dumps(slim_schema(e), ensure_ascii=False, indent=2)
+            _access_log({"kind": "resource_read", "uri": f"schema://{e}", "bytes": len(out)})
+            return out
+        reader.__name__ = f"schema_{e}"
+        return reader
+
+    count = 0
+    for entity in sorted(set(entities)):
+        mcp.resource(f"schema://{entity}")(_make_reader(entity))
+        count += 1
+    return count
 
 
 def customize_components(route: Any, component: OpenAPITool | OpenAPIResource | OpenAPIResourceTemplate) -> None:
@@ -970,9 +1019,13 @@ def customize_components(route: Any, component: OpenAPITool | OpenAPIResource | 
         if param_details:
             component.description += "\nParameters:\n" + "\n".join(param_details)
 
+        # Track entities of exposed tools (used to auto-restrict schema:// resources).
+        entity = resolve_entity(route)
+        if entity:
+            _EXPOSED_ENTITIES.add(entity)
         # Append entity field blueprint for GET tools (helps the agent build $filter/$select).
         if (route.method or "").upper() == "GET":
-            blueprint = build_blueprint(resolve_entity(route), detail_for(route.method, route.path))
+            blueprint = build_blueprint(entity, detail_for(route.method, route.path))
             if blueprint:
                 component.description += blueprint
 
@@ -1274,8 +1327,10 @@ async def main():
 
     if SCHEMA_RESOURCES:
         try:
-            register_schema_resources(mcp)
-            logger.info("✅ Registered schema://{entity} template + odata://filter-help")
+            allowed = allowed_resource_entities()
+            n = register_schema_resources(mcp, allowed)
+            logger.info("✅ Registered %d schema:// resource(s) + odata://filter-help (%s)",
+                        n, "explicit allowlist" if SCHEMA_RESOURCE_ENTITIES else "auto: exposed tools")
         except Exception as e:
             logger.warning("⚠️ Failed to register schema resources: %s", e)
 
