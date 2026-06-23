@@ -1,6 +1,6 @@
 # Universis MCP Server
 
-> **Version:** 0.2.2
+> **Version:** 0.4.0
 
 A FastMCP-based MCP server that wraps the Universis REST API (Ellogon/OData) into MCP tools and resources. Uses OAuth2 **client_credentials** flow to obtain tokens, or supports **bearer passthrough** from the MCP transport.
 
