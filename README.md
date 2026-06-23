@@ -416,3 +416,9 @@ Universis-MCP/
 > bad ones, so the server now preserves valid refs and only neutralises the few
 > dangling ones (logged at startup). Response-body cleaning (`clean_refs`) is
 > unchanged and still applied to HTTP responses.
+
+## License
+
+**All rights reserved** for now — see [LICENSE](LICENSE). The repository is public
+for reference only; no usage rights are granted yet. A formal license (possibly
+open-source/copyleft) will be added later.
